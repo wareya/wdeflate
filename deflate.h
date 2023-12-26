@@ -1,9 +1,6 @@
 #ifndef INCL_DEFLATE
 #define INCL_DEFLATE
 
-// you probably want:
-// static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t quality_level, uint8_t zlib_mode)
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -27,7 +24,7 @@
 #endif
 
 // must be at least 3
-static const size_t lz77_min_lookback_length = 3;
+static const size_t lz77_min_lookback_length = 4;
 
 #ifndef DEFL_LOW_MEMORY
 #define DEFL_HASH_SIZE (20) // 1m
@@ -114,20 +111,19 @@ static inline uint64_t hashmap_get(defl_hashmap * hashmap, size_t i, const uint8
             uint64_t size = 0;
             
             size_t d = 1;
-            while (value > 0 && input[i - d] == input[value - 1] && d <= pre_context)
+            while (value > 0 && input[i - d] == input[value - 1] && d <= pre_context && d < 200)
             {
                 value -= 1;
-                size += 1;
                 remaining += 1;
                 d += 1;
             }
             d -= 1;
             
-            while (size < 258 && size < remaining && input[i + size] == input[value + size])
+            while (size + d < 258 && size < remaining && input[i + size] == input[value + d + size])
                 size += 1;
             
-            if (size > 258)
-                size = 258;
+            if (size > 258 - d)
+                size = 258 - d;
             
             // bad heuristic for "is it worth it?"
             if (size > best_size)
@@ -360,7 +356,7 @@ size_t gen_canonical_code(uint64_t * counts, huff_node_t ** unordered_dict, huff
     // Canonicalization algorithms only work on sorted lists. Because of frequency ties, our
     //  code list might not be sorted by code length. Let's fix that by sorting it first.
     
-    if (symbol_count > 2)
+    if (symbol_count >= 2)
         qsort(unordered_dict, symbol_count, sizeof(huff_node_t*), huff_len_compare);
     
     // If we only have one symbol, we need to ensure that it thinks it has a code length of exactly 1.
@@ -489,7 +485,7 @@ static void huff_write_code_desc(bit_buffer * ret, huff_node_t ** dict, huff_nod
             else
                 bits_push(ret, bitswap(lens[i] - 1, 4), 4);
         }
-        //printf("pushing length %d for code %d\n", dict[i] ? dict[i]->code_len : 0, i);
+        //printf("writing: code %04X (len %d) has symbol %d\n", dict[i] ? dict[i]->code : 0, dict[i] ? dict[i]->code_len : 0, i);
     }
 }
 
@@ -548,7 +544,7 @@ static void dist_get_info(size_t dist, uint16_t * arg_code, uint16_t * arg_bit_c
     }
 }
 
-static uint32_t compute_adler32(const uint8_t * data, size_t size)
+static uint32_t defl_compute_adler32(const uint8_t * data, size_t size)
 {
     uint32_t a = 1;
     uint32_t b = 0;
@@ -559,7 +555,27 @@ static uint32_t compute_adler32(const uint8_t * data, size_t size)
     }
     return (b << 16) | a;
 }
-static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t quality_level, uint8_t zlib_mode)
+
+static uint32_t defl_compute_crc32(const uint8_t * data, size_t size, uint32_t init)
+{
+    uint32_t crc_table[256] = {0};
+
+    for (size_t i = 0; i < 256; i += 1)
+    {
+        uint32_t c = i;
+        for (size_t j = 0; j < 8; j += 1)
+            c = (c >> 1) ^ ((c & 1) ? 0xEDB88320 : 0);
+        crc_table[i] = c;
+    }
+    
+    init ^= 0xFFFFFFFF;
+    for (size_t i = 0; i < size; i += 1)
+        init = crc_table[(init ^ data[i]) & 0xFF] ^ (init >> 8);
+    
+    return init ^ 0xFFFFFFFF;
+}
+
+static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t quality_level, uint8_t header_mode)
 {
     if (quality_level > 12)
         quality_level = 12;
@@ -579,15 +595,33 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
     bit_buffer ret;
     memset(&ret, 0, sizeof(bit_buffer));
     
-    if (zlib_mode)
+    // zlib
+    if (header_mode == 1)
     {
         // standard deflate
         bits_push(&ret, 0x78, 8);
         // default compression strength
         bits_push(&ret, 0x9C, 8);
     }
+    // gzip
+    else if (header_mode >= 2)
+    {
+        // magic
+        bits_push(&ret, 0x1F, 8);
+        bits_push(&ret, 0x8B, 8);
+        // deflate compression
+        bits_push(&ret, 0x08, 8);
+        // no flags (no filename, comment, header crc, etc)
+        bits_push(&ret, 0x00, 8);
+        // no timestamp
+        bits_push(&ret, 0x00, 32);
+        // fastest (4) compression or maximum (2) compression...???
+        bits_push(&ret, quality_level == 0 ? 4 : 2, 8);
+        // unknown origin filesystem
+        bits_push(&ret, 0xFF, 8);
+    }
     
-    uint32_t checksum = compute_adler32(input, input_len);
+    uint32_t checksum = header_mode ? header_mode == 1 ? defl_compute_adler32(input, input_len) : defl_compute_crc32(input, input_len, 0) : 0;
     
     uint64_t i = 0;
     // Split up into chunks, so that each chunk can have a more ideal huffman code.
@@ -673,7 +707,8 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
             }
             
             assert(size <= input_len - i);
-            assert(lb_size <= 258);
+            if (lb_size > 258)
+                lb_size = 258;
             
             literal_count += size;
             
@@ -693,8 +728,6 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
             {
                 uint64_t dist = i - lb_loc;
                 assert(dist <= i);
-                
-                //printf("producing lookback with size %d and dist %d\n", lb_size, dist);
                 
                 uint16_t size_code = 0;
                 len_get_info(lb_size, &size_code, 0, 0);
@@ -747,6 +780,8 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
         
         huff_write_code_desc(&ret, dict, dist_dict);
         
+        //printf("huff desc ended at %08X:%d\n", ret.byte_index, ret.bit_index);
+        
         for (size_t j = 0; j < command_count; j++)
         {
             uint64_t size    = commands[j * 4 + 0];
@@ -756,6 +791,9 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
             // push literals
             if (size != 0)
             {
+                //if (j < 8 &&  0x000332CC)
+                //    printf("producing lookback with size %d and dist %d\n", lb_size, dist);
+                
                 uint8_t * start = (uint8_t *)commands[j * 4 + 1];
                 uint8_t * end = start + size;
                 while (start < end)
@@ -813,10 +851,18 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
     bits_push(&ret, 0, 16); // zero length
     bits_push(&ret, 0xFFFF, 16); // zero length (one's complement)
     
-    if (zlib_mode)
+    // zlib
+    if (header_mode == 1)
     {
         bits_align_to_byte(&ret);
         bits_push(&ret, byteswap_int(checksum, 4), 32);
+    }
+    // gzip
+    else if (header_mode >= 2)
+    {
+        bits_align_to_byte(&ret);
+        bits_push(&ret, checksum, 32);
+        bits_push(&ret, input_len, 32);
     }
     //printf("-- addr %08llX\n", (unsigned long long)ret.byte_index);
     

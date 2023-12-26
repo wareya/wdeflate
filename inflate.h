@@ -1,9 +1,6 @@
 #ifndef INCL_INFLATE
 #define INCL_INFLATE
 
-// you probably want:
-// byte_buffer do_inflate(byte_buffer * input_bytes, int * error)
-
 #include <stdint.h> // basic types
 #include <stdlib.h> // size_t
 
@@ -12,7 +9,19 @@
 #define ASSERT_OR_BROKEN_FILE(expr,ret) { if (!(expr)) { *error = -1; printf("assert failed on line %d\n", __LINE__); return ret; } }
 #define ASSERT_OR_BROKEN_DECODER(expr,ret) { if (!(expr)) { *error = 1; printf("assert failed on line %d\n", __LINE__); return ret; } }
 
-static void build_code(uint8_t * code_lens, uint16_t * code_lits, uint16_t * code_by_len, size_t total_count, int * error)
+static uint32_t infl_compute_adler32(const uint8_t * data, size_t size)
+{
+    uint32_t a = 1;
+    uint32_t b = 0;
+    for (size_t i = 0; i < size; i += 1)
+    {
+        a = (a + data[i]) % 65521;
+        b = (b + a) % 65521;
+    }
+    return (b << 16) | a;
+}
+
+void build_code(uint8_t * code_lens, uint16_t * code_lits, uint16_t * code_by_len, size_t total_count, int * error)
 {
     uint16_t min = 0;
     uint16_t len_count[15] = {0};
@@ -41,10 +50,11 @@ static void build_code(uint8_t * code_lens, uint16_t * code_lits, uint16_t * cod
             uint16_t code = code_by_len[len]++;
             //printf("assigning code %02X to value %d\n", code, val);
             code_lits[code] = val;
+            //printf("reading: code %04X (len %d) has symbol %d\n", code, len, val);
         }
     }
 }
-static uint16_t read_huff_code(bit_buffer * input, uint16_t * code_by_len, int * error)
+uint16_t read_huff_code(bit_buffer * input, uint16_t * code_by_len, int * error)
 {
     uint8_t code_len = 1;
     uint16_t code = bit_pop(input);
@@ -58,7 +68,7 @@ static uint16_t read_huff_code(bit_buffer * input, uint16_t * code_by_len, int *
     return code;
 }
 
-static void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits, uint16_t * code_by_len, uint16_t * dist_code_lits, uint16_t * dist_code_by_len, int * error)
+void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits, uint16_t * code_by_len, uint16_t * dist_code_lits, uint16_t * dist_code_by_len, int * error)
 {
     int huff_error = 0;
     uint16_t literal = 256;
@@ -105,7 +115,7 @@ static void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits,
 // on error, error is set to nonzero. otherwise error is unset
 // positive error: bug in decoder
 // negative error: broken DEFLATE data
-static byte_buffer do_inflate(byte_buffer * input_bytes, int * error)
+byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t header_mode)
 {
     byte_buffer ret = {0, 0, 0, 0};
     bit_buffer input = {*input_bytes, input_bytes->cur, 0};
@@ -135,6 +145,9 @@ static byte_buffer do_inflate(byte_buffer * input_bytes, int * error)
     uint16_t static_dists_by_len[16];
     memset(static_dists_by_len, 0, sizeof(uint16_t) * 16);
     static_dists_by_len[5] = 0xFFFF;
+    
+    if (header_mode == 1)
+        bits_pop(&input, 16);
     
     while(1)
     {
@@ -232,6 +245,8 @@ static byte_buffer do_inflate(byte_buffer * input_bytes, int * error)
             build_code(dist_code_lens, dist_code_lits, dist_code_by_len, 32, &code_error);
             ASSERT_OR_BROKEN_FILE(code_error == 0, ret)
             
+            //printf("-- finished reading huff at %08X:%d\n", input.byte_index, input.bit_index);
+            
             int lz77_error = 0;
             do_lz77(&input, &ret, code_lits, code_by_len, dist_code_lits, dist_code_by_len, &lz77_error);
             ASSERT_OR_BROKEN_FILE(lz77_error == 0, ret)
@@ -247,6 +262,15 @@ static byte_buffer do_inflate(byte_buffer * input_bytes, int * error)
         
         if (final)
             break;
+    }
+    
+    if (header_mode == 1)
+    {
+        bits_align_to_byte(&input);
+        //printf("-- literal addr %08llX\n", (unsigned long long)input.byte_index);
+        uint32_t expected_checksum = byteswap_int(bits_pop(&input, 32), 4);
+        uint32_t checksum = infl_compute_adler32(ret.data, ret.len);
+        ASSERT_OR_BROKEN_FILE(expected_checksum == checksum, ret)
     }
     
     return ret;
