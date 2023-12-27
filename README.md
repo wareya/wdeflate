@@ -12,10 +12,11 @@ Example usage:
         for (size_t i = 0; i < comp.buffer.len; i++)
             printf("%02X ", comp.buffer.data[i]);
         puts("");
+
         int error = 0;
         puts("decompressing...");
-        comp.buffer.cur = 2;
-        byte_buffer decomp = do_inflate(&comp.buffer, &error);
+        byte_buffer decomp = do_inflate(&comp.buffer, &error, 1);
+
         printf("%d\n", error);
         printf("%s\n", decomp.data);
 ```
