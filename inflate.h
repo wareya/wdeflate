@@ -1,6 +1,9 @@
 #ifndef INCL_INFLATE
 #define INCL_INFLATE
 
+// you probably want:
+// byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t header_mode)
+
 #include <stdint.h> // basic types
 #include <stdlib.h> // size_t
 
@@ -21,7 +24,26 @@ static uint32_t infl_compute_adler32(const uint8_t * data, size_t size)
     return (b << 16) | a;
 }
 
-void build_code(uint8_t * code_lens, uint16_t * code_lits, uint16_t * code_by_len, size_t total_count, int * error)
+static uint32_t infl_compute_crc32(const uint8_t * data, size_t size, uint32_t init)
+{
+    uint32_t crc_table[256] = {0};
+
+    for (size_t i = 0; i < 256; i += 1)
+    {
+        uint32_t c = i;
+        for (size_t j = 0; j < 8; j += 1)
+            c = (c >> 1) ^ ((c & 1) ? 0xEDB88320 : 0);
+        crc_table[i] = c;
+    }
+    
+    init ^= 0xFFFFFFFF;
+    for (size_t i = 0; i < size; i += 1)
+        init = crc_table[(init ^ data[i]) & 0xFF] ^ (init >> 8);
+    
+    return init ^ 0xFFFFFFFF;
+}
+
+static void build_code(uint8_t * code_lens, uint16_t * code_lits, uint16_t * code_by_len, size_t total_count, int * error)
 {
     uint16_t min = 0;
     uint16_t len_count[15] = {0};
@@ -54,7 +76,7 @@ void build_code(uint8_t * code_lens, uint16_t * code_lits, uint16_t * code_by_le
         }
     }
 }
-uint16_t read_huff_code(bit_buffer * input, uint16_t * code_by_len, int * error)
+static uint16_t read_huff_code(bit_buffer * input, uint16_t * code_by_len, int * error)
 {
     uint8_t code_len = 1;
     uint16_t code = bit_pop(input);
@@ -68,7 +90,7 @@ uint16_t read_huff_code(bit_buffer * input, uint16_t * code_by_len, int * error)
     return code;
 }
 
-void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits, uint16_t * code_by_len, uint16_t * dist_code_lits, uint16_t * dist_code_by_len, int * error)
+static void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits, uint16_t * code_by_len, uint16_t * dist_code_lits, uint16_t * dist_code_by_len, int * error)
 {
     int huff_error = 0;
     uint16_t literal = 256;
@@ -112,10 +134,14 @@ void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits, uint16
     } while (literal != 256);
     //puts("block ended!");
 }
+
+// decompression starts at input_bytes->cur
 // on error, error is set to nonzero. otherwise error is unset
 // positive error: bug in decoder
 // negative error: broken DEFLATE data
-byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t header_mode)
+// returns any decompressed data even on error
+// on success, sets input_bytes->cur field to where the decompressor stopped decompressing
+static byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t header_mode)
 {
     byte_buffer ret = {0, 0, 0, 0};
     bit_buffer input = {*input_bytes, input_bytes->cur, 0};
@@ -147,7 +173,51 @@ byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t header_mo
     static_dists_by_len[5] = 0xFFFF;
     
     if (header_mode == 1)
-        bits_pop(&input, 16);
+    {
+        uint16_t info = bits_pop(&input, 16);
+        uint16_t check = byteswap_int(info, 2);
+        ASSERT_OR_BROKEN_FILE(check / 31 * 31 == check, ret) // check value
+        uint8_t cmf = info & 0xF;
+        uint8_t flg = info >> 8;
+        ASSERT_OR_BROKEN_FILE((cmf & 0xF) == 8, ret) // deflate
+        ASSERT_OR_BROKEN_FILE((flg & 0x20) == 0, ret) // FDICT flag; dictionaries are not supported
+    }
+    else if (header_mode >= 2)
+    {
+        ASSERT_OR_BROKEN_FILE(bits_pop(&input, 8) == 0x1F, ret) // magic
+        ASSERT_OR_BROKEN_FILE(bits_pop(&input, 8) == 0x8B, ret) // magic
+        ASSERT_OR_BROKEN_FILE(bits_pop(&input, 8) == 0x08, ret) // deflate
+        
+        uint8_t flg = bits_pop(&input, 8); // flags
+        // uint8_t ftext = flg & 1; // file is ascii text - unused
+        uint8_t fcrc = !!(flg & 2); // header CRC is present
+        uint8_t fextra = !!(flg & 4); // extra sections are present
+        uint8_t fname = !!(flg & 8); // original filename is present
+        uint8_t fcomment = !!(flg & 16); // comment is present
+        
+        ASSERT_OR_BROKEN_FILE((fcomment >> 5) == 0, ret) // reserved bits, must be zero
+        
+        bits_pop(&input, 32); // modification time, unused
+        
+        bits_pop(&input, 8); // extra flags, unused (indicates compression strength)
+        bits_pop(&input, 8); // OS, unused
+        
+        if (fextra)
+        {
+            uint16_t xlen = bits_pop(&input, 16);
+            // extra field is not used
+            for (size_t i = 0; i < xlen; i += 1)
+                bits_pop(&input, 8);
+        }
+        while (fname && bits_pop(&input, 8) != 0) { }
+        while (fcomment && bits_pop(&input, 8) != 0) { }
+        if (fcrc)
+        {
+            uint16_t crc = infl_compute_crc32(input.buffer.data, input.byte_index, 0) & 0xFFFF;
+            uint16_t expected_crc = bits_pop(&input, 16);
+            ASSERT_OR_BROKEN_FILE(crc == expected_crc, ret)
+        }
+    }
     
     while(1)
     {
@@ -272,6 +342,17 @@ byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t header_mo
         uint32_t checksum = infl_compute_adler32(ret.data, ret.len);
         ASSERT_OR_BROKEN_FILE(expected_checksum == checksum, ret)
     }
+    else if (header_mode >= 2)
+    {
+        uint32_t crc = infl_compute_crc32(ret.data, ret.len, 0);
+        uint32_t expected_crc = bits_pop(&input, 32);
+        ASSERT_OR_BROKEN_FILE(crc == expected_crc, ret)
+        uint32_t expected_size = bits_pop(&input, 32);
+        uint32_t size = ret.len & 0xFFFFFFFF;
+        ASSERT_OR_BROKEN_FILE(expected_size == size, ret)
+    }
+    
+    input_bytes->cur = input.byte_index + (input.bit_index != 0);
     
     return ret;
 }

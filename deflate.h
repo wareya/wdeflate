@@ -1,6 +1,9 @@
 #ifndef INCL_DEFLATE
 #define INCL_DEFLATE
 
+// you probably want:
+// static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t quality_level, uint8_t header_mode)
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdint.h>
@@ -47,7 +50,7 @@ typedef struct {
     uint16_t chain_len;
 } defl_hashmap;
 
-#define defl_prevlink_mask ((1<<DEFL_PREVLINK_SIZE) - 1)
+const size_t defl_prevlink_mask = ((1<<DEFL_PREVLINK_SIZE) - 1);
 
 #define DEFL_HASH_LENGTH ((lz77_min_lookback_length) < 4 ? (lz77_min_lookback_length) : 4)
 
@@ -106,7 +109,7 @@ static inline uint64_t hashmap_get(defl_hashmap * hashmap, size_t i, const uint8
     {
         if (i - value > hashmap->max_distance)
             break;
-        if (memcmp(&input[i], &input[value], 4) == 0 && input[i + best_size] == input[value + best_size])
+        if (memcmp(&input[i], &input[value], lz77_min_lookback_length) == 0 && input[i + best_size] == input[value + best_size])
         {
             uint64_t size = 0;
             
@@ -579,14 +582,21 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
 {
     if (quality_level > 12)
         quality_level = 12;
+    if (quality_level < -12)
+        quality_level = -12;
     
     defl_hashmap hashmap;
     hashmap.hashtable = (uint32_t *)DEFL_MALLOC(sizeof(uint32_t *) * (1 << DEFL_HASH_SIZE));
     hashmap.prevlink = (uint32_t *)DEFL_MALLOC(sizeof(uint32_t *) * (1 << DEFL_PREVLINK_SIZE));
     memset(hashmap.hashtable, 0, sizeof(uint32_t *) * (1 << DEFL_HASH_SIZE));
     memset(hashmap.prevlink, 0, sizeof(uint32_t *) * (1 << DEFL_PREVLINK_SIZE));
-    hashmap.chain_len = (1 << (quality_level - 1));
-    hashmap.max_distance = (1 << (quality_level + 11));
+    
+    int8_t chain_bits = quality_level - 1 + (quality_level < 0);
+    if (chain_bits < 0)
+        chain_bits = 0;
+    hashmap.chain_len = (1 << chain_bits);
+    
+    hashmap.max_distance = (1 << (quality_level + 11 + (quality_level < 0)));
     if (hashmap.max_distance > 32768)
         hashmap.max_distance = 32768;
     
@@ -862,7 +872,7 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
     {
         bits_align_to_byte(&ret);
         bits_push(&ret, checksum, 32);
-        bits_push(&ret, input_len, 32);
+        bits_push(&ret, input_len & 0xFFFFFFFF, 32);
     }
     //printf("-- addr %08llX\n", (unsigned long long)ret.byte_index);
     
