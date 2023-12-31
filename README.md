@@ -2,6 +2,16 @@
 
 Public domain DEFLATE compressor and decompressor written in C99/C++11, using memory safe programming practices (stretchy buffers).
 
+Not fuzzed.
+
+Supports zlib and gzip headers, and also raw deflate streams.
+
+zlib header support notes: zlib dictionary directives are not supported.
+
+gzip (.gz) header support notes: If you want to decompress a gzip file with multiple "members" (i.e. what you get when you `cat` multiple gzip files together) you have to do it manually.
+
+The above header support notes don't mean that the deflate implementation itself is incomplete. The deflate implementation is complete.
+
 Example usage:
 
 ```c
