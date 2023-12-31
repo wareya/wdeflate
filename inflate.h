@@ -102,6 +102,7 @@ static void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits,
         
         if (literal < 256)
         {
+            //printf("literal %d\n", literal);
             byte_push(ret, literal);
         }
         else if (literal > 256)
@@ -123,11 +124,16 @@ static void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits,
             uint16_t dist = dist_mins[dist_literal] + bits_pop(input, dist_extra_bits);
             ASSERT_OR_BROKEN_FILE(dist <= ret->len,)
             
+            //printf("lz77 len %d dist %d\n", len, dist);
+            
             for (size_t j = 0; j < len; j++)
                 byte_push(ret, ret->data[ret->len - dist]);
         }
         else
+        {
+            //printf("end of stream at 0x%02llX\n", input->byte_index);
             break;
+        }
         
         if (input->byte_index == input->buffer.len && input->bit_index != 0)
             ASSERT_OR_BROKEN_FILE(0,)
@@ -153,7 +159,7 @@ static byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t he
     for (uint16_t i = 0; i < 144; i++)
         static_lits[i + 48] = i;
     for (uint16_t i = 0; i < 8; i++)
-        static_lits[i + 384] = i + 280;
+        static_lits[i + 192] = i + 280;
     for (uint16_t i = 0; i < 112; i++)
         static_lits[i + 400] = i + 144;
     
