@@ -2,7 +2,7 @@
 
 Public domain DEFLATE compressor and decompressor written in C99/C++11, using memory safe programming practices (stretchy buffers).
 
-Not fuzzed.
+Has been fuzzed with Jackalope.
 
 Supports zlib and gzip headers, and also raw deflate streams.
 

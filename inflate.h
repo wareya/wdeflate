@@ -6,6 +6,7 @@
 
 #include <stdint.h> // basic types
 #include <stdlib.h> // size_t
+#include <stdio.h> // printf
 
 #include "buffers.h"
 
@@ -87,6 +88,7 @@ static uint16_t read_huff_code(bit_buffer * input, uint16_t * code_by_len, int *
     }
     //printf("read a code (%d) with length %d\n", code, code_len);
     ASSERT_OR_BROKEN_FILE(code != 0 || code_len < 16, code)
+    ASSERT_OR_BROKEN_FILE(code < (1 << 15), code)
     return code;
 }
 
@@ -96,8 +98,9 @@ static void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits,
     uint16_t literal = 256;
     do
     {
-        literal = code_lits[read_huff_code(input, code_by_len, &huff_error)];
+        uint16_t lit_code = read_huff_code(input, code_by_len, &huff_error);
         ASSERT_OR_BROKEN_FILE(huff_error == 0,)
+        literal = code_lits[lit_code];
         ASSERT_OR_BROKEN_FILE(literal <= 285,)
         
         if (literal < 256)
@@ -113,8 +116,9 @@ static void do_lz77(bit_buffer * input, byte_buffer * ret, uint16_t * code_lits,
             uint16_t len_mins[29] = {3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258};
             uint16_t len = len_mins[literal-257] + bits_pop(input, len_extra_bits);
             
-            uint16_t dist_literal = dist_code_lits[read_huff_code(input, dist_code_by_len, &huff_error)];
+            uint16_t dist_code = read_huff_code(input, dist_code_by_len, &huff_error);
             ASSERT_OR_BROKEN_FILE(huff_error == 0,)
+            uint16_t dist_literal = dist_code_lits[dist_code];
             ASSERT_OR_BROKEN_FILE(dist_literal <= 29,)
             
             uint8_t dist_extra_bits = 0;
@@ -178,7 +182,7 @@ static byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t he
     memset(static_dists_by_len, 0, sizeof(uint16_t) * 16);
     static_dists_by_len[5] = 0xFFFF;
     
-    if (header_mode == 1)
+    if (header_mode == 1 || header_mode == 10)
     {
         uint16_t info = bits_pop(&input, 16);
         uint16_t check = byteswap_int(info, 2);
@@ -188,7 +192,7 @@ static byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t he
         ASSERT_OR_BROKEN_FILE((cmf & 0xF) == 8, ret) // deflate
         ASSERT_OR_BROKEN_FILE((flg & 0x20) == 0, ret) // FDICT flag; dictionaries are not supported
     }
-    else if (header_mode >= 2)
+    else if (header_mode == 2 || header_mode == 20)
     {
         ASSERT_OR_BROKEN_FILE(bits_pop(&input, 8) == 0x1F, ret) // magic
         ASSERT_OR_BROKEN_FILE(bits_pop(&input, 8) == 0x8B, ret) // magic
@@ -279,9 +283,10 @@ static byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t he
             uint8_t raw_code_lens[288 + 32] = {0};
             for (size_t i = 0; i < len_count + dist_count; i += 1)
             {
-                uint16_t inst = inst_code_lits[read_huff_code(&input, inst_code_by_len, &huff_error)];
-                //printf("\t\t\t\t\t(for value %d)\n", i < 288 ? i : i - 288);
+                uint16_t inst_code = read_huff_code(&input, inst_code_by_len, &huff_error);
                 ASSERT_OR_BROKEN_FILE(huff_error == 0, ret)
+                uint16_t inst = inst_code_lits[inst_code];
+                //printf("\t\t\t\t\t(for value %d)\n", i < 288 ? i : i - 288);
                 
                 if (inst < 16)
                     raw_code_lens[i] = inst;
@@ -339,7 +344,6 @@ static byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t he
         if (final)
             break;
     }
-    
     if (header_mode == 1)
     {
         bits_align_to_byte(&input);
@@ -348,7 +352,7 @@ static byte_buffer do_inflate(byte_buffer * input_bytes, int * error, uint8_t he
         uint32_t checksum = infl_compute_adler32(ret.data, ret.len);
         ASSERT_OR_BROKEN_FILE(expected_checksum == checksum, ret)
     }
-    else if (header_mode >= 2)
+    else if (header_mode == 2)
     {
         uint32_t crc = infl_compute_crc32(ret.data, ret.len, 0);
         uint32_t expected_crc = bits_pop(&input, 32);

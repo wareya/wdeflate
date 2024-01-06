@@ -2,8 +2,9 @@
 #define INCL_BUFFERS
 
 #include <stdint.h>
-#include <stdlib.h> // size_t
+#include <stddef.h> // size_t
 #include <string.h> // memcpy
+#include <assert.h> // assert
 
 #ifndef BUF_REALLOC
 #define BUF_REALLOC (realloc)
@@ -30,7 +31,9 @@ static inline void bytes_reserve(byte_buffer * buf, size_t extra)
         buf->cap = 8;
     while (buf->len + extra >= buf->cap)
         buf->cap <<= 1;
-    buf->data = (uint8_t *)BUF_REALLOC(buf->data, buf->cap);
+    uint8_t * next = (uint8_t *)BUF_REALLOC(buf->data, buf->cap);
+    assert(next);
+    buf->data = next;
     if (!buf->data)
         buf->cap = 0;
 }
@@ -41,7 +44,9 @@ static inline void byte_push(byte_buffer * buf, uint8_t byte)
         buf->cap = buf->cap << 1;
         if (buf->cap < 8)
             buf->cap = 8;
-        buf->data = (uint8_t *)BUF_REALLOC(buf->data, buf->cap);
+        uint8_t * next = (uint8_t *)BUF_REALLOC(buf->data, buf->cap);
+        assert(next);
+        buf->data = next;
     }
     buf->data[buf->len] = byte;
     buf->len += 1;

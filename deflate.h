@@ -165,7 +165,7 @@ typedef struct _huff_node {
     uint16_t symbol;
 } huff_node_t;
 
-static huff_node_t * alloc_huff_node()
+static huff_node_t * alloc_huff_node(void)
 {
     return (huff_node_t *)DEFL_MALLOC(sizeof(huff_node_t));
 }
@@ -283,6 +283,7 @@ size_t gen_canonical_code(uint64_t * counts, huff_node_t ** unordered_dict, huff
     for (size_t i = 0; i < capacity; i += 1)
     {
         unordered_dict[i] = alloc_huff_node();
+        assert(unordered_dict[i]);
         unordered_dict[i]->symbol = counts[i] & ((1 << symbol_bits) - 1);
         unordered_dict[i]->code = 0;
         unordered_dict[i]->code_len = 0;
@@ -330,6 +331,7 @@ size_t gen_canonical_code(uint64_t * counts, huff_node_t ** unordered_dict, huff
         
         // make new node
         huff_node_t * new_node = alloc_huff_node();
+        assert(new_node);
         new_node->symbol = 0;
         new_node->code = 0;
         new_node->code_len = 0;
@@ -578,6 +580,7 @@ static uint32_t defl_compute_crc32(const uint8_t * data, size_t size, uint32_t i
     return init ^ 0xFFFFFFFF;
 }
 
+// quality level: from -12 to 12, indicates compression quality. 0 means "store without compressing". the higher the quality, the slower.
 static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t quality_level, uint8_t header_mode)
 {
     if (quality_level > 12)
@@ -586,10 +589,12 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
         quality_level = -12;
     
     defl_hashmap hashmap;
-    hashmap.hashtable = (uint32_t *)DEFL_MALLOC(sizeof(uint32_t *) * (1 << DEFL_HASH_SIZE));
-    hashmap.prevlink = (uint32_t *)DEFL_MALLOC(sizeof(uint32_t *) * (1 << DEFL_PREVLINK_SIZE));
-    memset(hashmap.hashtable, 0, sizeof(uint32_t *) * (1 << DEFL_HASH_SIZE));
-    memset(hashmap.prevlink, 0, sizeof(uint32_t *) * (1 << DEFL_PREVLINK_SIZE));
+    hashmap.hashtable = (uint32_t *)DEFL_MALLOC(sizeof(uint32_t) * (1 << DEFL_HASH_SIZE));
+    assert(hashmap.hashtable);
+    hashmap.prevlink = (uint32_t *)DEFL_MALLOC(sizeof(uint32_t) * (1 << DEFL_PREVLINK_SIZE));
+    assert(hashmap.prevlink);
+    memset(hashmap.hashtable, 0, sizeof(uint32_t) * (1 << DEFL_HASH_SIZE));
+    memset(hashmap.prevlink, 0, sizeof(uint32_t) * (1 << DEFL_PREVLINK_SIZE));
     
     int8_t chain_bits = quality_level - 1 + (quality_level < 0);
     if (chain_bits < 0)
@@ -644,6 +649,7 @@ static bit_buffer do_deflate(const uint8_t * input, uint64_t input_len, int8_t q
     
     // commands have 4 numbers: size, pointer, lb_size, and distance
     uint64_t * commands = (uint64_t *)DEFL_MALLOC(sizeof(uint64_t) * chunk_max_commands * 4);
+    assert(commands);
     size_t command_count = 0;
     
     // store only
